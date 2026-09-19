@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -15,6 +16,7 @@ import (
 
 var _ resource.Resource = &certificateResource{}
 var _ resource.ResourceWithModifyPlan = &certificateResource{}
+var _ resource.ResourceWithImportState = &certificateResource{}
 
 type certificateResource struct {
 	client *Client
@@ -47,6 +49,11 @@ type certificateResourceModel struct {
 	NotAfter           types.String `tfsdk:"not_after"`
 	CreatedAt          types.String `tfsdk:"created_at"`
 	PEM                types.String `tfsdk:"pem"`
+	AutoRenew          types.Bool   `tfsdk:"auto_renew"`
+	AutoDeploy         types.Bool   `tfsdk:"auto_deploy"`
+	CustodyModel       types.String `tfsdk:"custody_model"`
+	KeyName            types.String `tfsdk:"key_name"`
+	KeyRef             types.String `tfsdk:"key_ref"`
 
 	RenewTrigger   types.String `tfsdk:"renew_trigger"`
 	RekeyTrigger   types.String `tfsdk:"rekey_trigger"`
@@ -63,6 +70,19 @@ func (r *certificateResource) Metadata(
 	resp *resource.MetadataResponse,
 ) {
 	resp.TypeName = req.ProviderTypeName + "_certificate"
+}
+
+func (r *certificateResource) ImportState(
+	ctx context.Context,
+	req resource.ImportStateRequest,
+	resp *resource.ImportStateResponse,
+) {
+	resource.ImportStatePassthroughID(
+		ctx,
+		path.Root("id"),
+		req,
+		resp,
+	)
 }
 
 func replaceString() []planmodifier.String {
@@ -202,6 +222,34 @@ func (r *certificateResource) Schema(
 				Description: "X.509 certificate in PEM format.",
 			},
 
+			"auto_renew": schema.BoolAttribute{
+				Optional:    true,
+				Computed:    true,
+				Description: "Automatically renew the certificate according to SecuriTLS automation policy.",
+			},
+
+			"auto_deploy": schema.BoolAttribute{
+				Optional:    true,
+				Computed:    true,
+				Description: "Automatically deploy the certificate after automated renewal.",
+			},
+
+			"custody_model": schema.StringAttribute{
+				Optional:    true,
+				Computed:    true,
+				Description: "Private key custody model: securitls, satellite, or hsm. Changing this value rekeys the certificate.",
+			},
+
+			"key_name": schema.StringAttribute{
+				Computed:    true,
+				Description: "Stored private key name for SecuriTLS-managed or Satellite-encrypted custody.",
+			},
+
+			"key_ref": schema.StringAttribute{
+				Computed:    true,
+				Description: "Non-exportable private key reference for HSM-backed custody.",
+			},
+
 			"renew_trigger": schema.StringAttribute{
 				Optional:    true,
 				Description: "Changing this value to a new non-null value triggers certificate renewal.",
@@ -327,6 +375,24 @@ func certificatePayload(
 
 	setIfString(
 		p,
+		"custodyModel",
+		m.CustodyModel,
+	)
+
+	if !m.CustodyModel.IsNull() && !m.CustodyModel.IsUnknown() {
+		model := m.CustodyModel.ValueString()
+		if model != "securitls" && model != "satellite" && model != "hsm" {
+			return nil, fmt.Errorf("custody_model must be one of securitls, satellite, or hsm")
+		}
+
+		if (model == "satellite" || model == "hsm") &&
+			(m.SatelliteID.IsNull() || m.SatelliteID.IsUnknown() || m.SatelliteID.ValueString() == "") {
+			return nil, fmt.Errorf("satellite_id is required when custody_model is %s", model)
+		}
+	}
+
+	setIfString(
+		p,
 		"storage",
 		m.Storage,
 	)
@@ -366,6 +432,22 @@ func certificatePayload(
 		"serial",
 		m.Serial,
 	)
+
+	// The API applies its own automation defaults when the automation object is
+	// omitted. Terraform may configure either automation field independently.
+	automation := map[string]any{}
+
+	if !m.AutoRenew.IsNull() && !m.AutoRenew.IsUnknown() {
+		automation["autoRenew"] = m.AutoRenew.ValueBool()
+	}
+
+	if !m.AutoDeploy.IsNull() && !m.AutoDeploy.IsUnknown() {
+		automation["autoDeploy"] = m.AutoDeploy.ValueBool()
+	}
+
+	if len(automation) > 0 {
+		p["automation"] = automation
+	}
 
 	ks := map[string]any{}
 
@@ -467,6 +549,34 @@ func applyCertificate(
 		"createdAt",
 	); v != "" {
 		m.CreatedAt = types.StringValue(v)
+	}
+
+	if automation := mapFromMap(out, "automation"); automation != nil {
+		if v, ok := automation["autoRenew"].(bool); ok {
+			m.AutoRenew = types.BoolValue(v)
+		}
+
+		if v, ok := automation["autoDeploy"].(bool); ok {
+			m.AutoDeploy = types.BoolValue(v)
+		}
+	}
+
+	if key := mapFromMap(out, "key"); key != nil {
+		if v := stringFromMap(key, "custodyModel"); v != "" {
+			m.CustodyModel = types.StringValue(v)
+		}
+
+		if v := stringFromMap(key, "keyName"); v != "" {
+			m.KeyName = types.StringValue(v)
+		} else {
+			m.KeyName = types.StringNull()
+		}
+
+		if v := stringFromMap(key, "keyRef"); v != "" {
+			m.KeyRef = types.StringValue(v)
+		} else {
+			m.KeyRef = types.StringNull()
+		}
 	}
 
 	d := mapFromMap(
@@ -750,6 +860,26 @@ func normalizeCertificateComputed(
 		m.PEM = types.StringNull()
 	}
 
+	if m.AutoRenew.IsUnknown() {
+		m.AutoRenew = types.BoolNull()
+	}
+
+	if m.AutoDeploy.IsUnknown() {
+		m.AutoDeploy = types.BoolNull()
+	}
+
+	if m.CustodyModel.IsUnknown() {
+		m.CustodyModel = types.StringNull()
+	}
+
+	if m.KeyName.IsUnknown() {
+		m.KeyName = types.StringNull()
+	}
+
+	if m.KeyRef.IsUnknown() {
+		m.KeyRef = types.StringNull()
+	}
+
 	if m.RenewTrigger.IsUnknown() {
 		m.RenewTrigger = types.StringNull()
 	}
@@ -829,6 +959,17 @@ func certificateInt64Changed(
 	return !state.Equal(plan)
 }
 
+func certificateBoolChanged(
+	state types.Bool,
+	plan types.Bool,
+) bool {
+	if plan.IsUnknown() {
+		return false
+	}
+
+	return !state.Equal(plan)
+}
+
 func certificateSetChanged(
 	state types.Set,
 	plan types.Set,
@@ -869,13 +1010,6 @@ func certificateConfigChanged(
 	if certificateStringChanged(
 		state.Signer,
 		plan.Signer,
-	) {
-		return true
-	}
-
-	if certificateStringChanged(
-		state.SatelliteID,
-		plan.SatelliteID,
 	) {
 		return true
 	}
@@ -986,6 +1120,22 @@ func certificateConfigChanged(
 	}
 
 	return false
+}
+
+func certificateCustodyChanged(
+	state certificateResourceModel,
+	plan certificateResourceModel,
+) bool {
+	return certificateStringChanged(state.CustodyModel, plan.CustodyModel) ||
+		certificateStringChanged(state.SatelliteID, plan.SatelliteID)
+}
+
+func certificateAutomationChanged(
+	state certificateResourceModel,
+	plan certificateResourceModel,
+) bool {
+	return certificateBoolChanged(state.AutoRenew, plan.AutoRenew) ||
+		certificateBoolChanged(state.AutoDeploy, plan.AutoDeploy)
 }
 
 //
@@ -1107,6 +1257,97 @@ func (r *certificateResource) executeCertificateLifecycle(
 		plan,
 	)
 
+	return nil
+}
+
+//
+// -----------------------------------------------------------------------------
+// PATCH mutable certificate settings
+// -----------------------------------------------------------------------------
+//
+
+func (r *certificateResource) patchCertificate(
+	ctx context.Context,
+	currentID string,
+	state certificateResourceModel,
+	plan *certificateResourceModel,
+	patchAutomation bool,
+	patchCustody bool,
+) error {
+	mergeCertificatePlanWithState(state, plan)
+
+	payload := map[string]any{}
+
+	if patchAutomation {
+		if certificateBoolChanged(state.AutoRenew, plan.AutoRenew) &&
+			!plan.AutoRenew.IsNull() && !plan.AutoRenew.IsUnknown() {
+			payload["autoRenew"] = plan.AutoRenew.ValueBool()
+		}
+
+		if certificateBoolChanged(state.AutoDeploy, plan.AutoDeploy) &&
+			!plan.AutoDeploy.IsNull() && !plan.AutoDeploy.IsUnknown() {
+			payload["autoDeploy"] = plan.AutoDeploy.ValueBool()
+		}
+	}
+
+	if patchCustody {
+		if plan.CustodyModel.IsNull() || plan.CustodyModel.IsUnknown() || plan.CustodyModel.ValueString() == "" {
+			return fmt.Errorf("custody_model must be known before changing certificate custody")
+		}
+
+		model := plan.CustodyModel.ValueString()
+		if model != "securitls" && model != "satellite" && model != "hsm" {
+			return fmt.Errorf("custody_model must be one of securitls, satellite, or hsm")
+		}
+
+		satellite := ""
+		if !plan.SatelliteID.IsNull() && !plan.SatelliteID.IsUnknown() {
+			satellite = plan.SatelliteID.ValueString()
+		}
+
+		if (model == "satellite" || model == "hsm") && satellite == "" {
+			return fmt.Errorf("satellite_id is required when custody_model is %s", model)
+		}
+
+		if model == "securitls" {
+			satellite = ""
+		}
+
+		payload["custodyModel"] = map[string]any{
+			"model":     model,
+			"satellite": satellite,
+		}
+	}
+
+	var out map[string]any
+	status, err := r.client.Do(
+		ctx,
+		http.MethodPatch,
+		"/certificates/"+currentID,
+		payload,
+		&out,
+	)
+	if err != nil {
+		return fmt.Errorf("SecuriTLS returned HTTP %d: %w", status, err)
+	}
+
+	applyCertificate(plan, out)
+
+	if patchCustody {
+		if plan.ID.IsNull() || plan.ID.IsUnknown() || plan.ID.ValueString() == "" {
+			return fmt.Errorf("custody update response did not contain a successor certificate id: %v", out)
+		}
+
+		if plan.ID.ValueString() == currentID {
+			return fmt.Errorf("custody update returned the existing certificate id %s instead of a rekeyed successor certificate id", currentID)
+		}
+	} else {
+		// Automation updates keep the current certificate/key intact.
+		plan.ID = types.StringValue(currentID)
+	}
+
+	r.readPEM(ctx, plan)
+	normalizeCertificateComputed(plan)
 	return nil
 }
 
@@ -1346,41 +1587,20 @@ func (r *certificateResource) Update(
 			"Invalid certificate state",
 			"Certificate state does not contain an id.",
 		)
-
 		return
 	}
 
-	//
-	// -------------------------------------------------------------------------
-	// Detect lifecycle trigger changes.
-	// -------------------------------------------------------------------------
-	//
-
-	renewTriggered := certificateTriggerChanged(
-		state.RenewTrigger,
-		plan.RenewTrigger,
-	)
-
-	rekeyTriggered := certificateTriggerChanged(
-		state.RekeyTrigger,
-		plan.RekeyTrigger,
-	)
-
-	reissueTriggered := certificateTriggerChanged(
-		state.ReissueTrigger,
-		plan.ReissueTrigger,
-	)
+	renewTriggered := certificateTriggerChanged(state.RenewTrigger, plan.RenewTrigger)
+	rekeyTriggered := certificateTriggerChanged(state.RekeyTrigger, plan.RekeyTrigger)
+	reissueTriggered := certificateTriggerChanged(state.ReissueTrigger, plan.ReissueTrigger)
 
 	triggerCount := 0
-
 	if renewTriggered {
 		triggerCount++
 	}
-
 	if rekeyTriggered {
 		triggerCount++
 	}
-
 	if reissueTriggered {
 		triggerCount++
 	}
@@ -1390,34 +1610,30 @@ func (r *certificateResource) Update(
 			"Conflicting certificate lifecycle operations",
 			"Only one of renew_trigger, rekey_trigger, or reissue_trigger may change to a new value during a single apply.",
 		)
-
 		return
 	}
 
-	//
-	// -------------------------------------------------------------------------
-	// Detect certificate configuration changes.
-	// -------------------------------------------------------------------------
-	//
+	configChanged := certificateConfigChanged(state, plan)
+	custodyChanged := certificateCustodyChanged(state, plan)
+	automationChanged := certificateAutomationChanged(state, plan)
 
-	configChanged := certificateConfigChanged(
-		state,
-		plan,
-	)
-
-	//
-	// A configuration change means reissue.
-	//
-	// Do not combine configuration changes with renew or rekey because those
-	// represent different certificate lifecycle operations.
-	//
+	// Custody changes use PATCH /certificates/:certId and internally rekey.
+	// Do not combine them with another lifecycle operation or a reissue-causing
+	// certificate configuration change, which would otherwise create two
+	// successor certificates in a single apply.
+	if custodyChanged && (renewTriggered || rekeyTriggered || reissueTriggered || configChanged) {
+		resp.Diagnostics.AddError(
+			"Cannot change custody with another certificate lifecycle operation",
+			"Changing custody already rekeys the certificate. Apply the custody change separately from certificate configuration changes and lifecycle triggers.",
+		)
+		return
+	}
 
 	if configChanged && renewTriggered {
 		resp.Diagnostics.AddError(
 			"Cannot renew and change certificate configuration simultaneously",
 			"Changing certificate properties causes a reissue. Apply the configuration change separately from renew_trigger.",
 		)
-
 		return
 	}
 
@@ -1426,56 +1642,59 @@ func (r *certificateResource) Update(
 			"Cannot rekey and change certificate configuration simultaneously",
 			"Changing certificate properties causes a reissue. Apply the configuration change separately from rekey_trigger.",
 		)
+		return
+	}
 
+	// Custody and automation are both mutable through PATCH. A custody change
+	// returns the rekeyed successor certificate; an automation-only change keeps
+	// the current certificate and key intact.
+	if custodyChanged || (automationChanged && !renewTriggered && !rekeyTriggered && !reissueTriggered && !configChanged) {
+		err := r.patchCertificate(
+			ctx,
+			currentID,
+			state,
+			&plan,
+			automationChanged,
+			custodyChanged,
+		)
+		if err != nil {
+			resp.Diagnostics.AddError(
+				"Unable to update certificate",
+				err.Error(),
+			)
+			return
+		}
+
+		resp.Diagnostics.Append(
+			resp.State.Set(ctx, &plan)...,
+		)
 		return
 	}
 
 	var operation string
-
 	switch {
 	case renewTriggered:
 		operation = "renew"
-
 	case rekeyTriggered:
 		operation = "rekey"
-
 	case reissueTriggered:
 		operation = "reissue"
-
 	case configChanged:
 		operation = "reissue"
-
 	default:
-		//
-		// No remote certificate operation.
-		//
-		// This includes removing a trigger from configuration. Removing a
-		// trigger only updates Terraform state; it does not invoke SecuriTLS.
-		//
+		// No remote certificate operation. This includes removing a trigger
+		// from configuration.
 		state.RenewTrigger = plan.RenewTrigger
 		state.RekeyTrigger = plan.RekeyTrigger
 		state.ReissueTrigger = plan.ReissueTrigger
 
 		resp.Diagnostics.Append(
-			resp.State.Set(
-				ctx,
-				&state,
-			)...,
+			resp.State.Set(ctx, &state)...,
 		)
-
 		return
 	}
 
-	//
-	// -------------------------------------------------------------------------
-	// Execute lifecycle operation.
-	// -------------------------------------------------------------------------
-	//
-
-	mergeCertificatePlanWithState(
-		state,
-		&plan,
-	)
+	mergeCertificatePlanWithState(state, &plan)
 
 	err := r.executeCertificateLifecycle(
 		ctx,
@@ -1483,42 +1702,38 @@ func (r *certificateResource) Update(
 		operation,
 		&plan,
 	)
-
 	if err != nil {
 		resp.Diagnostics.AddError(
-			fmt.Sprintf(
-				"Unable to %s certificate",
-				operation,
-			),
+			fmt.Sprintf("Unable to %s certificate", operation),
 			err.Error(),
 		)
-
 		return
 	}
 
-	//
-	// IMPORTANT:
-	//
-	// executeCertificateLifecycle() called applyCertificate(&plan, out),
-	// therefore plan.ID now contains the NEW certificate's ID.
-	//
-	// Terraform resource address remains:
-	//
-	// securitls_certificate.foo
-	//
-	// but its computed .id advances from the old SecuriTLS certificate
-	// record to the successor certificate record.
-	//
-
-	normalizeCertificateComputed(
-		&plan,
-	)
-
-	resp.Diagnostics.Append(
-		resp.State.Set(
+	// Automation is mutable independently of certificate/key lifecycle. If it
+	// changed in the same apply, update the newly-created successor in place.
+	if automationChanged {
+		successorID := plan.ID.ValueString()
+		err = r.patchCertificate(
 			ctx,
+			successorID,
+			plan,
 			&plan,
-		)...,
+			true,
+			false,
+		)
+		if err != nil {
+			resp.Diagnostics.AddError(
+				"Unable to update certificate automation",
+				err.Error(),
+			)
+			return
+		}
+	}
+
+	normalizeCertificateComputed(&plan)
+	resp.Diagnostics.Append(
+		resp.State.Set(ctx, &plan)...,
 	)
 }
 
@@ -1648,6 +1863,7 @@ func (r *certificateResource) ModifyPlan(
 		state,
 		plan,
 	)
+	custodyChanged := certificateCustodyChanged(state, plan)
 
 	//
 	// A genuine certificate lifecycle operation will produce a successor
@@ -1656,7 +1872,8 @@ func (r *certificateResource) ModifyPlan(
 	if renewTriggered ||
 		rekeyTriggered ||
 		reissueTriggered ||
-		configChanged {
+		configChanged ||
+		custodyChanged {
 
 		return
 	}
@@ -1688,6 +1905,20 @@ func (r *certificateResource) ModifyPlan(
 	plan.NotAfter = state.NotAfter
 	plan.CreatedAt = state.CreatedAt
 	plan.PEM = state.PEM
+	plan.KeyName = state.KeyName
+	plan.KeyRef = state.KeyRef
+
+	if plan.CustodyModel.IsUnknown() {
+		plan.CustodyModel = state.CustodyModel
+	}
+
+	if plan.AutoRenew.IsUnknown() {
+		plan.AutoRenew = state.AutoRenew
+	}
+
+	if plan.AutoDeploy.IsUnknown() {
+		plan.AutoDeploy = state.AutoDeploy
+	}
 
 	resp.Diagnostics.Append(
 		resp.Plan.Set(
@@ -1736,6 +1967,30 @@ func mergeCertificatePlanWithState(
 	if plan.SignatureAlgorithm.IsUnknown() {
 		plan.SignatureAlgorithm = state.SignatureAlgorithm
 	}
+
+	if plan.CustodyModel.IsUnknown() {
+		plan.CustodyModel = state.CustodyModel
+	}
+
+	if plan.SatelliteID.IsUnknown() {
+		plan.SatelliteID = state.SatelliteID
+	}
+
+	if plan.AutoRenew.IsUnknown() {
+		plan.AutoRenew = state.AutoRenew
+	}
+
+	if plan.AutoDeploy.IsUnknown() {
+		plan.AutoDeploy = state.AutoDeploy
+	}
+
+	if plan.KeyName.IsUnknown() {
+		plan.KeyName = state.KeyName
+	}
+
+	if plan.KeyRef.IsUnknown() {
+		plan.KeyRef = state.KeyRef
+	}
 }
 
 func certificateConfigHasUnknowns(
@@ -1760,5 +2015,8 @@ func certificateConfigHasUnknowns(
 		config.KeySizeBits.IsUnknown() ||
 		config.Curve.IsUnknown() ||
 		config.ParameterSet.IsUnknown() ||
-		config.SignatureAlgorithm.IsUnknown()
+		config.SignatureAlgorithm.IsUnknown() ||
+		config.CustodyModel.IsUnknown() ||
+		config.AutoRenew.IsUnknown() ||
+		config.AutoDeploy.IsUnknown()
 }
