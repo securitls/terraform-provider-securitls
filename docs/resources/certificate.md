@@ -48,8 +48,11 @@ resource "securitls_certificate" "leaf" {
 
 ### Optional
 
+- `auto_deploy` (Boolean) Automatically deploy the certificate after automated renewal.
+- `auto_renew` (Boolean) Automatically renew the certificate according to SecuriTLS automation policy.
 - `country` (String)
 - `curve` (String)
+- `custody_model` (String) Private key custody model: securitls, satellite, or hsm. Changing this value rekeys the certificate.
 - `dns_sans` (Set of String)
 - `extended_key_usage` (Set of String)
 - `key_algorithm` (String)
@@ -73,6 +76,8 @@ resource "securitls_certificate" "leaf" {
 
 - `created_at` (String)
 - `id` (String) The ID of this resource.
+- `key_name` (String) Stored private key name for SecuriTLS-managed or Satellite-encrypted custody.
+- `key_ref` (String) Non-exportable private key reference for HSM-backed custody.
 - `not_after` (String)
 - `not_before` (String)
 - `pem` (String) X.509 certificate in PEM format.
