@@ -2,7 +2,7 @@ TEST?=$$(go list ./... | grep -v 'vendor')
 HOSTNAME=registry.terraform.io
 NAMESPACE=securitls
 NAME=securitls
-VERSION?=0.2.0
+VERSION?=0.3.0
 
 GOOS:=$(shell go env GOOS)
 GOARCH:=$(shell go env GOARCH)

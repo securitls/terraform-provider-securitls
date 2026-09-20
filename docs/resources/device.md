@@ -42,7 +42,8 @@ resource "securitls_device" "web01" {
 
 ### Optional
 
-- `attachment` (Block Set) (see [below for nested schema](#nestedblock--attachment))
+- `attachment` (Block List) (see [below for nested schema](#nestedblock--attachment))
+- `ca_attachment` (Block List) A CA trust attachment. Only root and intermediate certificates are valid. (see [below for nested schema](#nestedblock--ca_attachment))
 - `crl_path` (String)
 - `satellite_id` (String)
 
@@ -64,6 +65,48 @@ Optional:
 - `ca_path` (String)
 - `chain_mode` (String)
 - `encryption_credential_id` (String)
+- `file_validation` (Attributes) File validation settings. If omitted, enabled defaults to true. (see [below for nested schema](#nestedatt--attachment--file_validation))
 - `include_root` (Boolean)
 - `key_mode` (String)
 - `key_path` (String)
+- `tls_validation` (Attributes) TLS validation settings. If omitted, enabled defaults to false. (see [below for nested schema](#nestedatt--attachment--tls_validation))
+
+<a id="nestedatt--attachment--file_validation"></a>
+### Nested Schema for `attachment.file_validation`
+
+Optional:
+
+- `enabled` (Boolean) Whether file validation is enabled. Defaults to true.
+
+
+<a id="nestedatt--attachment--tls_validation"></a>
+### Nested Schema for `attachment.tls_validation`
+
+Optional:
+
+- `enabled` (Boolean) Whether TLS validation is enabled. Defaults to false.
+- `port` (Number) TLS validation port. Required when TLS validation is enabled.
+- `server_name` (String) TLS server name used for certificate verification. Required when TLS validation is enabled.
+
+
+
+<a id="nestedblock--ca_attachment"></a>
+### Nested Schema for `ca_attachment`
+
+Required:
+
+- `cert_id` (String)
+- `path` (String)
+
+Optional:
+
+- `ca_update_trust_command` (String) Custom trust-store update command when ca_update_trust_preset is custom.
+- `ca_update_trust_preset` (String) Trust-store update preset. Defaults to none.
+- `file_validation` (Attributes) File validation settings. If omitted, enabled defaults to true. (see [below for nested schema](#nestedatt--ca_attachment--file_validation))
+
+<a id="nestedatt--ca_attachment--file_validation"></a>
+### Nested Schema for `ca_attachment.file_validation`
+
+Optional:
+
+- `enabled` (Boolean) Whether file validation is enabled. Defaults to true.

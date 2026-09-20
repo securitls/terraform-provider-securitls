@@ -53,7 +53,6 @@ resource "securitls_certificate" "leaf" {
 - `country` (String)
 - `curve` (String)
 - `custody_model` (String) Private key custody model: securitls, satellite, or hsm. Changing this value rekeys the certificate.
-- `dns_sans` (Set of String)
 - `extended_key_usage` (Set of String)
 - `key_algorithm` (String)
 - `key_size_bits` (Number)
@@ -65,6 +64,7 @@ resource "securitls_certificate" "leaf" {
 - `reissue_trigger` (String) Changing this value to a new non-null value explicitly triggers certificate reissuance.
 - `rekey_trigger` (String) Changing this value to a new non-null value triggers certificate rekeying.
 - `renew_trigger` (String) Changing this value to a new non-null value triggers certificate renewal.
+- `san` (Block Set) (see [below for nested schema](#nestedblock--san))
 - `satellite_id` (String)
 - `serial` (String)
 - `signature_algorithm` (String)
@@ -82,3 +82,11 @@ resource "securitls_certificate" "leaf" {
 - `not_before` (String)
 - `pem` (String) X.509 certificate in PEM format.
 - `status` (String)
+
+<a id="nestedblock--san"></a>
+### Nested Schema for `san`
+
+Required:
+
+- `type` (String) SAN type: dns or ip.
+- `value` (String) SAN value.

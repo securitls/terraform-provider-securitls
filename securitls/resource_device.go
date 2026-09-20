@@ -9,7 +9,14 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/objectdefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
 )
 
 var _ resource.Resource = &deviceResource{}
@@ -19,17 +26,18 @@ type deviceResource struct {
 }
 
 type deviceResourceModel struct {
-	ID          types.String `tfsdk:"id"`
-	Name        types.String `tfsdk:"name"`
-	Credential  types.String `tfsdk:"credential"`
-	Hostname    types.String `tfsdk:"hostname"`
-	Port        types.Int64  `tfsdk:"port"`
-	Username    types.String `tfsdk:"username"`
-	CRLType     types.String `tfsdk:"crl_type"`
-	CRLPath     types.String `tfsdk:"crl_path"`
-	SatelliteID types.String `tfsdk:"satellite_id"`
-	CreatedAt   types.String `tfsdk:"created_at"`
-	Attachments types.Set    `tfsdk:"attachment"`
+	ID            types.String `tfsdk:"id"`
+	Name          types.String `tfsdk:"name"`
+	Credential    types.String `tfsdk:"credential"`
+	Hostname      types.String `tfsdk:"hostname"`
+	Port          types.Int64  `tfsdk:"port"`
+	Username      types.String `tfsdk:"username"`
+	CRLType       types.String `tfsdk:"crl_type"`
+	CRLPath       types.String `tfsdk:"crl_path"`
+	SatelliteID   types.String `tfsdk:"satellite_id"`
+	CreatedAt     types.String `tfsdk:"created_at"`
+	Attachments   types.List   `tfsdk:"attachment"`
+	CAAttachments types.List   `tfsdk:"ca_attachment"`
 }
 
 type deviceAttachmentModel struct {
@@ -41,6 +49,26 @@ type deviceAttachmentModel struct {
 	CAPath                 types.String `tfsdk:"ca_path"`
 	IncludeRoot            types.Bool   `tfsdk:"include_root"`
 	EncryptionCredentialID types.String `tfsdk:"encryption_credential_id"`
+	FileValidation         types.Object `tfsdk:"file_validation"`
+	TLSValidation          types.Object `tfsdk:"tls_validation"`
+}
+
+type deviceCAAttachmentModel struct {
+	CertID               types.String `tfsdk:"cert_id"`
+	Path                 types.String `tfsdk:"path"`
+	CAUpdateTrustPreset  types.String `tfsdk:"ca_update_trust_preset"`
+	CAUpdateTrustCommand types.String `tfsdk:"ca_update_trust_command"`
+	FileValidation       types.Object `tfsdk:"file_validation"`
+}
+
+type deviceFileValidationModel struct {
+	Enabled types.Bool `tfsdk:"enabled"`
+}
+
+type deviceTLSValidationModel struct {
+	Enabled    types.Bool   `tfsdk:"enabled"`
+	Port       types.Int64  `tfsdk:"port"`
+	ServerName types.String `tfsdk:"server_name"`
 }
 
 func NewDeviceResource() resource.Resource {
@@ -66,6 +94,9 @@ func (r *deviceResource) Schema(
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed: true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 
 			"name": schema.StringAttribute{
@@ -103,11 +134,14 @@ func (r *deviceResource) Schema(
 
 			"created_at": schema.StringAttribute{
 				Computed: true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 		},
 
 		Blocks: map[string]schema.Block{
-			"attachment": schema.SetNestedBlock{
+			"attachment": schema.ListNestedBlock{
 				NestedObject: schema.NestedBlockObject{
 					Attributes: map[string]schema.Attribute{
 						"cert_id": schema.StringAttribute{
@@ -121,30 +155,150 @@ func (r *deviceResource) Schema(
 						"chain_mode": schema.StringAttribute{
 							Optional: true,
 							Computed: true,
+							PlanModifiers: []planmodifier.String{
+								stringplanmodifier.UseStateForUnknown(),
+							},
 						},
 
 						"key_mode": schema.StringAttribute{
 							Optional: true,
 							Computed: true,
+							PlanModifiers: []planmodifier.String{
+								stringplanmodifier.UseStateForUnknown(),
+							},
 						},
 
 						"key_path": schema.StringAttribute{
 							Optional: true,
 							Computed: true,
+							PlanModifiers: []planmodifier.String{
+								stringplanmodifier.UseStateForUnknown(),
+							},
 						},
 
 						"ca_path": schema.StringAttribute{
 							Optional: true,
 							Computed: true,
+							PlanModifiers: []planmodifier.String{
+								stringplanmodifier.UseStateForUnknown(),
+							},
 						},
 
 						"include_root": schema.BoolAttribute{
 							Optional: true,
 							Computed: true,
+							PlanModifiers: []planmodifier.Bool{
+								boolplanmodifier.UseStateForUnknown(),
+							},
 						},
 
 						"encryption_credential_id": schema.StringAttribute{
 							Optional: true,
+						},
+
+						"file_validation": schema.SingleNestedAttribute{
+							Optional:    true,
+							Computed:    true,
+							Description: "File validation settings. If omitted, enabled defaults to true.",
+							Default: objectdefault.StaticValue(
+								types.ObjectValueMust(
+									deviceFileValidationObjectType().AttrTypes,
+									map[string]attr.Value{
+										"enabled": types.BoolValue(true),
+									},
+								),
+							),
+							Attributes: map[string]schema.Attribute{
+								"enabled": schema.BoolAttribute{
+									Optional:    true,
+									Computed:    true,
+									Default:     booldefault.StaticBool(true),
+									Description: "Whether file validation is enabled. Defaults to true.",
+								},
+							},
+						},
+
+						"tls_validation": schema.SingleNestedAttribute{
+							Optional:    true,
+							Computed:    true,
+							Description: "TLS validation settings. If omitted, enabled defaults to false.",
+							Default: objectdefault.StaticValue(
+								types.ObjectValueMust(
+									deviceTLSValidationObjectType().AttrTypes,
+									map[string]attr.Value{
+										"enabled":     types.BoolValue(false),
+										"port":        types.Int64Null(),
+										"server_name": types.StringNull(),
+									},
+								),
+							),
+							Attributes: map[string]schema.Attribute{
+								"enabled": schema.BoolAttribute{
+									Optional:    true,
+									Computed:    true,
+									Default:     booldefault.StaticBool(false),
+									Description: "Whether TLS validation is enabled. Defaults to false.",
+								},
+
+								"port": schema.Int64Attribute{
+									Optional:    true,
+									Description: "TLS validation port. Required when TLS validation is enabled.",
+								},
+
+								"server_name": schema.StringAttribute{
+									Optional:    true,
+									Description: "TLS server name used for certificate verification. Required when TLS validation is enabled.",
+								},
+							},
+						},
+					},
+				},
+			},
+
+			"ca_attachment": schema.ListNestedBlock{
+				Description: "A CA trust attachment. Only root and intermediate certificates are valid.",
+				NestedObject: schema.NestedBlockObject{
+					Attributes: map[string]schema.Attribute{
+						"cert_id": schema.StringAttribute{
+							Required: true,
+						},
+
+						"path": schema.StringAttribute{
+							Required: true,
+						},
+
+						"ca_update_trust_preset": schema.StringAttribute{
+							Optional:    true,
+							Computed:    true,
+							Default:     stringdefault.StaticString("none"),
+							Description: "Trust-store update preset. Defaults to none.",
+						},
+
+						"ca_update_trust_command": schema.StringAttribute{
+							Optional:    true,
+							Description: "Custom trust-store update command when ca_update_trust_preset is custom.",
+						},
+
+						"file_validation": schema.SingleNestedAttribute{
+							Optional:    true,
+							Computed:    true,
+							Description: "File validation settings. If omitted, enabled defaults to true.",
+							Default: objectdefault.StaticValue(
+								types.ObjectValueMust(
+									deviceFileValidationObjectType().AttrTypes,
+									map[string]attr.Value{
+										"enabled": types.BoolValue(true),
+									},
+								),
+							),
+							Attributes: map[string]schema.Attribute{
+								"enabled": schema.BoolAttribute{
+									Optional:    true,
+									Computed:    true,
+									Default:     booldefault.StaticBool(true),
+									Description: "Whether file validation is enabled. Defaults to true.",
+								},
+							},
 						},
 					},
 				},
@@ -167,6 +321,24 @@ func (r *deviceResource) Configure(
 // -----------------------------------------------------------------------------
 //
 
+func deviceFileValidationObjectType() types.ObjectType {
+	return types.ObjectType{
+		AttrTypes: map[string]attr.Type{
+			"enabled": types.BoolType,
+		},
+	}
+}
+
+func deviceTLSValidationObjectType() types.ObjectType {
+	return types.ObjectType{
+		AttrTypes: map[string]attr.Type{
+			"enabled":     types.BoolType,
+			"port":        types.Int64Type,
+			"server_name": types.StringType,
+		},
+	}
+}
+
 func deviceAttachmentObjectType() types.ObjectType {
 	return types.ObjectType{
 		AttrTypes: map[string]attr.Type{
@@ -178,24 +350,61 @@ func deviceAttachmentObjectType() types.ObjectType {
 			"ca_path":                  types.StringType,
 			"include_root":             types.BoolType,
 			"encryption_credential_id": types.StringType,
+			"file_validation":          deviceFileValidationObjectType(),
+			"tls_validation":           deviceTLSValidationObjectType(),
+		},
+	}
+}
+
+func deviceCAAttachmentObjectType() types.ObjectType {
+	return types.ObjectType{
+		AttrTypes: map[string]attr.Type{
+			"cert_id":                 types.StringType,
+			"path":                    types.StringType,
+			"ca_update_trust_preset":  types.StringType,
+			"ca_update_trust_command": types.StringType,
+			"file_validation":         deviceFileValidationObjectType(),
 		},
 	}
 }
 
 func getDeviceAttachments(
 	ctx context.Context,
-	set types.Set,
+	list types.List,
 ) ([]deviceAttachmentModel, diag.Diagnostics) {
 	var attachments []deviceAttachmentModel
 
-	if set.IsNull() || set.IsUnknown() {
+	if list.IsNull() || list.IsUnknown() {
 		return attachments, nil
 	}
 
-	diags := set.ElementsAs(
+	diags := list.ElementsAs(
 		ctx,
 		&attachments,
 		false,
+	)
+
+	return attachments, diags
+}
+
+func getDeviceCAAttachments(
+	ctx context.Context,
+	list types.List,
+) ([]deviceCAAttachmentModel, diag.Diagnostics) {
+	var diags diag.Diagnostics
+
+	if list.IsNull() || list.IsUnknown() {
+		return []deviceCAAttachmentModel{}, diags
+	}
+
+	var attachments []deviceCAAttachmentModel
+
+	diags.Append(
+		list.ElementsAs(
+			ctx,
+			&attachments,
+			false,
+		)...,
 	)
 
 	return attachments, diags
@@ -239,8 +448,9 @@ func devicePayload(m deviceResourceModel) map[string]any {
 //
 
 func attachmentPayload(
+	ctx context.Context,
 	attachment deviceAttachmentModel,
-) map[string]any {
+) (map[string]any, error) {
 	p := map[string]any{
 		"path": attachment.Path.ValueString(),
 	}
@@ -270,7 +480,161 @@ func attachmentPayload(
 		p["includeRoot"] = attachment.IncludeRoot.ValueBool()
 	}
 
-	return p
+	// SecuriTLS attachment defaults:
+	//   file validation = enabled
+	//   TLS validation  = disabled
+	//
+	// Optional Terraform blocks override these defaults when present.
+	fileValidation := map[string]any{
+		"enabled": true,
+	}
+
+	tlsValidation := map[string]any{
+		"enabled": false,
+	}
+
+	if !attachment.FileValidation.IsNull() &&
+		!attachment.FileValidation.IsUnknown() {
+
+		var file deviceFileValidationModel
+
+		diags := attachment.FileValidation.As(
+			ctx,
+			&file,
+			basetypes.ObjectAsOptions{},
+		)
+
+		if diags.HasError() {
+			return nil, fmt.Errorf(
+				"failed to decode file_validation: %v",
+				diags,
+			)
+		}
+
+		enabled := true
+		if !file.Enabled.IsNull() && !file.Enabled.IsUnknown() {
+			enabled = file.Enabled.ValueBool()
+		}
+
+		fileValidation["enabled"] = enabled
+	}
+
+	if !attachment.TLSValidation.IsNull() &&
+		!attachment.TLSValidation.IsUnknown() {
+
+		var tls deviceTLSValidationModel
+
+		diags := attachment.TLSValidation.As(
+			ctx,
+			&tls,
+			basetypes.ObjectAsOptions{},
+		)
+
+		if diags.HasError() {
+			return nil, fmt.Errorf(
+				"failed to decode tls_validation: %v",
+				diags,
+			)
+		}
+
+		enabled := false
+		if !tls.Enabled.IsNull() && !tls.Enabled.IsUnknown() {
+			enabled = tls.Enabled.ValueBool()
+		}
+
+		tlsValidation["enabled"] = enabled
+
+		if enabled {
+			if tls.Port.IsNull() ||
+				tls.Port.IsUnknown() ||
+				tls.Port.ValueInt64() <= 0 {
+				return nil, fmt.Errorf(
+					"enabled tls_validation requires a positive port",
+				)
+			}
+
+			if tls.ServerName.IsNull() ||
+				tls.ServerName.IsUnknown() ||
+				tls.ServerName.ValueString() == "" {
+				return nil, fmt.Errorf(
+					"enabled tls_validation requires server_name",
+				)
+			}
+
+			tlsValidation["port"] = tls.Port.ValueInt64()
+			tlsValidation["serverName"] = tls.ServerName.ValueString()
+		}
+	}
+
+	p["validation"] = map[string]any{
+		"file": fileValidation,
+		"tls":  tlsValidation,
+	}
+
+	return p, nil
+}
+
+func caAttachmentPayload(
+	ctx context.Context,
+	attachment deviceCAAttachmentModel,
+) (map[string]any, error) {
+	p := map[string]any{
+		"path": attachment.Path.ValueString(),
+	}
+
+	preset := "none"
+	if !attachment.CAUpdateTrustPreset.IsNull() &&
+		!attachment.CAUpdateTrustPreset.IsUnknown() &&
+		attachment.CAUpdateTrustPreset.ValueString() != "" {
+		preset = attachment.CAUpdateTrustPreset.ValueString()
+	}
+
+	p["caUpdateTrustPreset"] = preset
+
+	if preset == "custom" {
+		if attachment.CAUpdateTrustCommand.IsNull() ||
+			attachment.CAUpdateTrustCommand.IsUnknown() ||
+			attachment.CAUpdateTrustCommand.ValueString() == "" {
+			return nil, fmt.Errorf(
+				"ca_update_trust_preset custom requires ca_update_trust_command",
+			)
+		}
+
+		p["caUpdateTrustCmd"] = attachment.CAUpdateTrustCommand.ValueString()
+	}
+
+	fileEnabled := true
+
+	if !attachment.FileValidation.IsNull() &&
+		!attachment.FileValidation.IsUnknown() {
+
+		var file deviceFileValidationModel
+
+		diags := attachment.FileValidation.As(
+			ctx,
+			&file,
+			basetypes.ObjectAsOptions{},
+		)
+
+		if diags.HasError() {
+			return nil, fmt.Errorf(
+				"failed to decode ca_attachment.file_validation: %v",
+				diags,
+			)
+		}
+
+		if !file.Enabled.IsNull() && !file.Enabled.IsUnknown() {
+			fileEnabled = file.Enabled.ValueBool()
+		}
+	}
+
+	p["validation"] = map[string]any{
+		"file": map[string]any{
+			"enabled": fileEnabled,
+		},
+	}
+
+	return p, nil
 }
 
 //
@@ -343,20 +707,24 @@ func applyDeviceAttachments(
 
 	raw, exists := out["attachments"]
 
-	//
-	// Known empty attachment collection.
-	//
 	if !exists || raw == nil {
-		set, setDiags := types.SetValueFrom(
+		leafList, leafDiags := types.ListValueFrom(
 			ctx,
 			deviceAttachmentObjectType(),
 			[]deviceAttachmentModel{},
 		)
+		diags.Append(leafDiags...)
 
-		diags.Append(setDiags...)
+		caList, caDiags := types.ListValueFrom(
+			ctx,
+			deviceCAAttachmentObjectType(),
+			[]deviceCAAttachmentModel{},
+		)
+		diags.Append(caDiags...)
 
 		if !diags.HasError() {
-			m.Attachments = set
+			m.Attachments = leafList
+			m.CAAttachments = caList
 		}
 
 		return diags
@@ -375,11 +743,8 @@ func applyDeviceAttachments(
 		return diags
 	}
 
-	attachments := make(
-		[]deviceAttachmentModel,
-		0,
-		len(rawAttachments),
-	)
+	leafAttachments := make([]deviceAttachmentModel, 0)
+	caAttachments := make([]deviceCAAttachmentModel, 0)
 
 	for _, rawAttachment := range rawAttachments {
 		a, ok := rawAttachment.(map[string]any)
@@ -391,7 +756,78 @@ func applyDeviceAttachments(
 					rawAttachment,
 				),
 			)
+			continue
+		}
 
+		if stringFromMap(a, "type") == "ca" {
+			attachment := deviceCAAttachmentModel{
+				CertID:               types.StringNull(),
+				Path:                 types.StringNull(),
+				CAUpdateTrustPreset:  types.StringValue("none"),
+				CAUpdateTrustCommand: types.StringNull(),
+				FileValidation:       types.ObjectNull(deviceFileValidationObjectType().AttrTypes),
+			}
+
+			if v := stringFromMap(a, "certId", "cert_id", "certificateId"); v != "" {
+				attachment.CertID = types.StringValue(v)
+			}
+
+			if v := stringFromMap(a, "path"); v != "" {
+				attachment.Path = types.StringValue(v)
+			}
+
+			if v := stringFromMap(a, "caUpdateTrustPreset", "ca_update_trust_preset"); v != "" {
+				attachment.CAUpdateTrustPreset = types.StringValue(v)
+			}
+
+			if v := stringFromMap(a, "caUpdateTrustCmd", "ca_update_trust_command"); v != "" {
+				attachment.CAUpdateTrustCommand = types.StringValue(v)
+			}
+
+			fileEnabled := true
+			if validation := mapFromMap(a, "validation"); validation != nil {
+				if fileValidation := mapFromMap(validation, "file"); fileValidation != nil {
+					if enabled, ok := fileValidation["enabled"].(bool); ok {
+						fileEnabled = enabled
+					}
+				}
+			}
+
+			fileObj, fileObjDiags := types.ObjectValueFrom(
+				ctx,
+				deviceFileValidationObjectType().AttrTypes,
+				deviceFileValidationModel{
+					Enabled: types.BoolValue(fileEnabled),
+				},
+			)
+			diags.Append(fileObjDiags...)
+			if !fileObjDiags.HasError() {
+				attachment.FileValidation = fileObj
+			}
+
+			if attachment.CertID.IsNull() || attachment.CertID.ValueString() == "" {
+				diags.AddError(
+					"Invalid SecuriTLS response",
+					fmt.Sprintf(
+						"CA attachment does not contain certId: %v",
+						a,
+					),
+				)
+				continue
+			}
+
+			if attachment.Path.IsNull() || attachment.Path.ValueString() == "" {
+				diags.AddError(
+					"Invalid SecuriTLS response",
+					fmt.Sprintf(
+						"CA attachment does not contain path: %v",
+						a,
+					),
+				)
+				continue
+			}
+
+			caAttachments = append(caAttachments, attachment)
 			continue
 		}
 
@@ -404,14 +840,11 @@ func applyDeviceAttachments(
 			CAPath:                 types.StringNull(),
 			IncludeRoot:            types.BoolNull(),
 			EncryptionCredentialID: types.StringNull(),
+			FileValidation:         types.ObjectNull(deviceFileValidationObjectType().AttrTypes),
+			TLSValidation:          types.ObjectNull(deviceTLSValidationObjectType().AttrTypes),
 		}
 
-		if v := stringFromMap(
-			a,
-			"certId",
-			"cert_id",
-			"certificateId",
-		); v != "" {
+		if v := stringFromMap(a, "certId", "cert_id", "certificateId"); v != "" {
 			attachment.CertID = types.StringValue(v)
 		}
 
@@ -419,35 +852,19 @@ func applyDeviceAttachments(
 			attachment.Path = types.StringValue(v)
 		}
 
-		if v := stringFromMap(
-			a,
-			"chainMode",
-			"chain_mode",
-		); v != "" {
+		if v := stringFromMap(a, "chainMode", "chain_mode"); v != "" {
 			attachment.ChainMode = types.StringValue(v)
 		}
 
-		if v := stringFromMap(
-			a,
-			"keyMode",
-			"key_mode",
-		); v != "" {
+		if v := stringFromMap(a, "keyMode", "key_mode"); v != "" {
 			attachment.KeyMode = types.StringValue(v)
 		}
 
-		if v := stringFromMap(
-			a,
-			"keyPath",
-			"key_path",
-		); v != "" {
+		if v := stringFromMap(a, "keyPath", "key_path"); v != "" {
 			attachment.KeyPath = types.StringValue(v)
 		}
 
-		if v := stringFromMap(
-			a,
-			"caPath",
-			"ca_path",
-		); v != "" {
+		if v := stringFromMap(a, "caPath", "ca_path"); v != "" {
 			attachment.CAPath = types.StringValue(v)
 		}
 
@@ -461,16 +878,68 @@ func applyDeviceAttachments(
 			}
 		}
 
-		if v := stringFromMap(
-			a,
-			"encryption",
-			"encryption_credential_id",
-		); v != "" {
+		if v := stringFromMap(a, "encryption", "encryption_credential_id"); v != "" {
 			attachment.EncryptionCredentialID = types.StringValue(v)
 		}
 
-		if attachment.CertID.IsNull() ||
-			attachment.CertID.ValueString() == "" {
+		fileEnabled := true
+		tlsEnabled := false
+		tlsPort := types.Int64Null()
+		tlsServerName := types.StringNull()
+
+		if validation := mapFromMap(a, "validation"); validation != nil {
+			if fileValidation := mapFromMap(validation, "file"); fileValidation != nil {
+				if enabled, ok := fileValidation["enabled"].(bool); ok {
+					fileEnabled = enabled
+				}
+			}
+
+			if tlsValidation := mapFromMap(validation, "tls"); tlsValidation != nil {
+				if enabled, ok := tlsValidation["enabled"].(bool); ok {
+					tlsEnabled = enabled
+				}
+
+				if port := floatFromMap(tlsValidation, "port"); port > 0 {
+					tlsPort = types.Int64Value(int64(port))
+				}
+
+				if serverName := stringFromMap(
+					tlsValidation,
+					"serverName",
+					"server_name",
+				); serverName != "" {
+					tlsServerName = types.StringValue(serverName)
+				}
+			}
+		}
+
+		fileObj, fileObjDiags := types.ObjectValueFrom(
+			ctx,
+			deviceFileValidationObjectType().AttrTypes,
+			deviceFileValidationModel{
+				Enabled: types.BoolValue(fileEnabled),
+			},
+		)
+		diags.Append(fileObjDiags...)
+		if !fileObjDiags.HasError() {
+			attachment.FileValidation = fileObj
+		}
+
+		tlsObj, tlsObjDiags := types.ObjectValueFrom(
+			ctx,
+			deviceTLSValidationObjectType().AttrTypes,
+			deviceTLSValidationModel{
+				Enabled:    types.BoolValue(tlsEnabled),
+				Port:       tlsPort,
+				ServerName: tlsServerName,
+			},
+		)
+		diags.Append(tlsObjDiags...)
+		if !tlsObjDiags.HasError() {
+			attachment.TLSValidation = tlsObj
+		}
+
+		if attachment.CertID.IsNull() || attachment.CertID.ValueString() == "" {
 			diags.AddError(
 				"Invalid SecuriTLS response",
 				fmt.Sprintf(
@@ -478,12 +947,10 @@ func applyDeviceAttachments(
 					a,
 				),
 			)
-
 			continue
 		}
 
-		if attachment.Path.IsNull() ||
-			attachment.Path.ValueString() == "" {
+		if attachment.Path.IsNull() || attachment.Path.ValueString() == "" {
 			diags.AddError(
 				"Invalid SecuriTLS response",
 				fmt.Sprintf(
@@ -491,30 +958,33 @@ func applyDeviceAttachments(
 					a,
 				),
 			)
-
 			continue
 		}
 
-		attachments = append(
-			attachments,
-			attachment,
-		)
+		leafAttachments = append(leafAttachments, attachment)
 	}
 
 	if diags.HasError() {
 		return diags
 	}
 
-	set, setDiags := types.SetValueFrom(
+	leafList, leafDiags := types.ListValueFrom(
 		ctx,
 		deviceAttachmentObjectType(),
-		attachments,
+		leafAttachments,
 	)
+	diags.Append(leafDiags...)
 
-	diags.Append(setDiags...)
+	caList, caDiags := types.ListValueFrom(
+		ctx,
+		deviceCAAttachmentObjectType(),
+		caAttachments,
+	)
+	diags.Append(caDiags...)
 
 	if !diags.HasError() {
-		m.Attachments = set
+		m.Attachments = leafList
+		m.CAAttachments = caList
 	}
 
 	return diags
@@ -575,7 +1045,16 @@ func (r *deviceResource) attachCertificate(
 	deviceID string,
 	attachment deviceAttachmentModel,
 ) error {
-	_, err := r.client.Do(
+	payload, err := attachmentPayload(
+		ctx,
+		attachment,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	_, err = r.client.Do(
 		ctx,
 		http.MethodPost,
 		fmt.Sprintf(
@@ -583,7 +1062,7 @@ func (r *deviceResource) attachCertificate(
 			deviceID,
 			attachment.CertID.ValueString(),
 		),
-		attachmentPayload(attachment),
+		payload,
 		nil,
 	)
 
@@ -599,7 +1078,16 @@ func (r *deviceResource) updateCertificateAttachment(
 	deviceID string,
 	attachment deviceAttachmentModel,
 ) error {
-	_, err := r.client.Do(
+	payload, err := attachmentPayload(
+		ctx,
+		attachment,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	_, err = r.client.Do(
 		ctx,
 		http.MethodPatch,
 		fmt.Sprintf(
@@ -607,7 +1095,7 @@ func (r *deviceResource) updateCertificateAttachment(
 			deviceID,
 			attachment.CertID.ValueString(),
 		),
-		attachmentPayload(attachment),
+		payload,
 		nil,
 	)
 
@@ -641,6 +1129,66 @@ func (r *deviceResource) detachCertificate(
 	if status == http.StatusNotFound {
 		return nil
 	}
+
+	return err
+}
+
+func (r *deviceResource) attachCA(
+	ctx context.Context,
+	deviceID string,
+	attachment deviceCAAttachmentModel,
+) error {
+	payload, err := caAttachmentPayload(
+		ctx,
+		attachment,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Uses the same attach endpoint as leaf attachments; the backend dispatches
+	// based on the verified certificate level.
+	_, err = r.client.Do(
+		ctx,
+		http.MethodPost,
+		fmt.Sprintf(
+			"/devices/%s/attach/%s",
+			deviceID,
+			attachment.CertID.ValueString(),
+		),
+		payload,
+		nil,
+	)
+
+	return err
+}
+
+func (r *deviceResource) updateCAAttachment(
+	ctx context.Context,
+	deviceID string,
+	attachment deviceCAAttachmentModel,
+) error {
+	payload, err := caAttachmentPayload(
+		ctx,
+		attachment,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Uses the same attachment update endpoint; the backend dispatches to the
+	// CA update handler for root/intermediate certificates.
+	_, err = r.client.Do(
+		ctx,
+		http.MethodPatch,
+		fmt.Sprintf(
+			"/devices/%s/attachments/%s",
+			deviceID,
+			attachment.CertID.ValueString(),
+		),
+		payload,
+		nil,
+	)
 
 	return err
 }
@@ -710,6 +1258,25 @@ func boolValuesEqual(
 	return a.ValueBool() == b.ValueBool()
 }
 
+func objectValuesEqual(
+	a types.Object,
+	b types.Object,
+) bool {
+	if a.IsNull() != b.IsNull() {
+		return false
+	}
+
+	if a.IsUnknown() != b.IsUnknown() {
+		return false
+	}
+
+	if a.IsNull() || a.IsUnknown() {
+		return true
+	}
+
+	return a.Equal(b)
+}
+
 func attachmentsEqual(
 	a deviceAttachmentModel,
 	b deviceAttachmentModel,
@@ -721,7 +1288,9 @@ func attachmentsEqual(
 		stringValuesEqual(a.KeyPath, b.KeyPath) &&
 		stringValuesEqual(a.CAPath, b.CAPath) &&
 		boolValuesEqual(a.IncludeRoot, b.IncludeRoot) &&
-		stringValuesEqual(a.EncryptionCredentialID, b.EncryptionCredentialID)
+		stringValuesEqual(a.EncryptionCredentialID, b.EncryptionCredentialID) &&
+		objectValuesEqual(a.FileValidation, b.FileValidation) &&
+		objectValuesEqual(a.TLSValidation, b.TLSValidation)
 }
 
 //
@@ -805,6 +1374,97 @@ func (r *deviceResource) reconcileAttachments(
 		); err != nil {
 			return fmt.Errorf(
 				"unable to update certificate attachment %s: %w",
+				newAttachment.CertID.ValueString(),
+				err,
+			)
+		}
+	}
+
+	return nil
+}
+
+func caAttachmentMap(
+	attachments []deviceCAAttachmentModel,
+) map[string]deviceCAAttachmentModel {
+	result := make(
+		map[string]deviceCAAttachmentModel,
+		len(attachments),
+	)
+
+	for _, attachment := range attachments {
+		result[attachment.CertID.ValueString()] = attachment
+	}
+
+	return result
+}
+
+func caAttachmentsEqual(
+	a deviceCAAttachmentModel,
+	b deviceCAAttachmentModel,
+) bool {
+	return stringValuesEqual(a.CertID, b.CertID) &&
+		stringValuesEqual(a.Path, b.Path) &&
+		stringValuesEqual(a.CAUpdateTrustPreset, b.CAUpdateTrustPreset) &&
+		stringValuesEqual(a.CAUpdateTrustCommand, b.CAUpdateTrustCommand) &&
+		objectValuesEqual(a.FileValidation, b.FileValidation)
+}
+
+func (r *deviceResource) reconcileCAAttachments(
+	ctx context.Context,
+	deviceID string,
+	oldAttachments []deviceCAAttachmentModel,
+	newAttachments []deviceCAAttachmentModel,
+) error {
+	oldMap := caAttachmentMap(oldAttachments)
+	newMap := caAttachmentMap(newAttachments)
+
+	for certID, oldAttachment := range oldMap {
+		if _, exists := newMap[certID]; exists {
+			continue
+		}
+
+		if err := r.detachCertificate(
+			ctx,
+			deviceID,
+			oldAttachment.CertID.ValueString(),
+		); err != nil {
+			return fmt.Errorf(
+				"unable to detach CA certificate %s: %w",
+				oldAttachment.CertID.ValueString(),
+				err,
+			)
+		}
+	}
+
+	for certID, newAttachment := range newMap {
+		oldAttachment, exists := oldMap[certID]
+
+		if !exists {
+			if err := r.attachCA(
+				ctx,
+				deviceID,
+				newAttachment,
+			); err != nil {
+				return fmt.Errorf(
+					"unable to attach CA certificate %s: %w",
+					newAttachment.CertID.ValueString(),
+					err,
+				)
+			}
+			continue
+		}
+
+		if caAttachmentsEqual(oldAttachment, newAttachment) {
+			continue
+		}
+
+		if err := r.updateCAAttachment(
+			ctx,
+			deviceID,
+			newAttachment,
+		); err != nil {
+			return fmt.Errorf(
+				"unable to update CA attachment %s: %w",
 				newAttachment.CertID.ValueString(),
 				err,
 			)
@@ -900,6 +1560,37 @@ func (r *deviceResource) Create(
 				"Unable to attach certificate",
 				fmt.Sprintf(
 					"Unable to attach certificate %s to device %s: %s",
+					attachment.CertID.ValueString(),
+					plan.ID.ValueString(),
+					err,
+				),
+			)
+
+			return
+		}
+	}
+
+	caAttachments, diags := getDeviceCAAttachments(
+		ctx,
+		plan.CAAttachments,
+	)
+
+	resp.Diagnostics.Append(diags...)
+
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	for _, attachment := range caAttachments {
+		if err := r.attachCA(
+			ctx,
+			plan.ID.ValueString(),
+			attachment,
+		); err != nil {
+			resp.Diagnostics.AddError(
+				"Unable to attach CA certificate",
+				fmt.Sprintf(
+					"Unable to attach CA certificate %s to device %s: %s",
 					attachment.CertID.ValueString(),
 					plan.ID.ValueString(),
 					err,
@@ -1061,6 +1752,18 @@ func (r *deviceResource) Update(
 
 	resp.Diagnostics.Append(diags...)
 
+	oldCAAttachments, diags := getDeviceCAAttachments(
+		ctx,
+		state.CAAttachments,
+	)
+	resp.Diagnostics.Append(diags...)
+
+	newCAAttachments, diags := getDeviceCAAttachments(
+		ctx,
+		plan.CAAttachments,
+	)
+	resp.Diagnostics.Append(diags...)
+
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -1078,6 +1781,22 @@ func (r *deviceResource) Update(
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Unable to update device attachments",
+			err.Error(),
+		)
+
+		return
+	}
+
+	err = r.reconcileCAAttachments(
+		ctx,
+		deviceID,
+		oldCAAttachments,
+		newCAAttachments,
+	)
+
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Unable to update device CA attachments",
 			err.Error(),
 		)
 

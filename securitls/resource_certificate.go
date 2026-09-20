@@ -38,7 +38,7 @@ type certificateResourceModel struct {
 	Serial             types.String `tfsdk:"serial"`
 	KeyUsage           types.Set    `tfsdk:"key_usage"`
 	ExtendedKeyUsage   types.Set    `tfsdk:"extended_key_usage"`
-	DNSSANs            types.Set    `tfsdk:"dns_sans"`
+	SANs               types.Set    `tfsdk:"san"`
 	KeyAlgorithm       types.String `tfsdk:"key_algorithm"`
 	KeySizeBits        types.Int64  `tfsdk:"key_size_bits"`
 	Curve              types.String `tfsdk:"curve"`
@@ -58,6 +58,11 @@ type certificateResourceModel struct {
 	RenewTrigger   types.String `tfsdk:"renew_trigger"`
 	RekeyTrigger   types.String `tfsdk:"rekey_trigger"`
 	ReissueTrigger types.String `tfsdk:"reissue_trigger"`
+}
+
+type certificateSANModel struct {
+	Type  types.String `tfsdk:"type"`
+	Value types.String `tfsdk:"value"`
 }
 
 func NewCertificateResource() resource.Resource {
@@ -170,12 +175,6 @@ func (r *certificateResource) Schema(
 				ElementType: types.StringType,
 			},
 
-			"dns_sans": schema.SetAttribute{
-				Optional:    true,
-				Computed:    true,
-				ElementType: types.StringType,
-			},
-
 			"key_algorithm": schema.StringAttribute{
 				Optional: true,
 				Computed: true,
@@ -265,6 +264,24 @@ func (r *certificateResource) Schema(
 				Description: "Changing this value to a new non-null value explicitly triggers certificate reissuance.",
 			},
 		},
+
+		Blocks: map[string]schema.Block{
+			"san": schema.SetNestedBlock{
+				NestedObject: schema.NestedBlockObject{
+					Attributes: map[string]schema.Attribute{
+						"type": schema.StringAttribute{
+							Required:    true,
+							Description: "SAN type: dns or ip.",
+						},
+
+						"value": schema.StringAttribute{
+							Required:    true,
+							Description: "SAN value.",
+						},
+					},
+				},
+			},
+		},
 	}
 }
 
@@ -299,6 +316,29 @@ func setStringsFromSet(
 	return vals, nil
 }
 
+func sansFromSet(
+	ctx context.Context,
+	s types.Set,
+) ([]certificateSANModel, error) {
+	if s.IsNull() || s.IsUnknown() {
+		return nil, nil
+	}
+
+	var vals []certificateSANModel
+
+	diags := s.ElementsAs(
+		ctx,
+		&vals,
+		false,
+	)
+
+	if diags.HasError() {
+		return nil, fmt.Errorf("failed to decode sans")
+	}
+
+	return vals, nil
+}
+
 func certificatePayload(
 	ctx context.Context,
 	m certificateResourceModel,
@@ -319,9 +359,9 @@ func certificatePayload(
 		return nil, err
 	}
 
-	sans, err := setStringsFromSet(
+	sans, err := sansFromSet(
 		ctx,
-		m.DNSSANs,
+		m.SANs,
 	)
 	if err != nil {
 		return nil, err
@@ -348,12 +388,26 @@ func certificatePayload(
 			len(sans),
 		)
 
-		for _, v := range sans {
+		for _, san := range sans {
+			sanType := san.Type.ValueString()
+			value := san.Value.ValueString()
+
+			if sanType != "dns" && sanType != "ip" {
+				return nil, fmt.Errorf(
+					"unsupported SAN type %q; expected dns or ip",
+					sanType,
+				)
+			}
+
+			if value == "" {
+				return nil, fmt.Errorf("SAN value cannot be empty")
+			}
+
 			arr = append(
 				arr,
 				map[string]string{
-					"type":  "dns",
-					"value": v,
+					"type":  sanType,
+					"value": value,
 				},
 			)
 		}
@@ -511,6 +565,44 @@ func stringsToSet(vals []string) types.Set {
 	return s
 }
 
+func sansToSet(vals []certificateSANModel) types.Set {
+	objectType := types.ObjectType{
+		AttrTypes: map[string]attr.Type{
+			"type":  types.StringType,
+			"value": types.StringType,
+		},
+	}
+
+	items := make(
+		[]attr.Value,
+		0,
+		len(vals),
+	)
+
+	for _, v := range vals {
+		obj, diags := types.ObjectValue(
+			objectType.AttrTypes,
+			map[string]attr.Value{
+				"type":  v.Type,
+				"value": v.Value,
+			},
+		)
+
+		if diags.HasError() {
+			continue
+		}
+
+		items = append(items, obj)
+	}
+
+	set, _ := types.SetValue(
+		objectType,
+		items,
+	)
+
+	return set
+}
+
 func applyCertificate(
 	m *certificateResourceModel,
 	out map[string]any,
@@ -628,7 +720,7 @@ func applyCertificate(
 
 	if vals, ok := d["SANS"].([]any); ok {
 		items := make(
-			[]string,
+			[]certificateSANModel,
 			0,
 			len(vals),
 		)
@@ -639,25 +731,30 @@ func applyCertificate(
 				continue
 			}
 
-			if stringFromMap(
+			sanType := stringFromMap(
 				san,
 				"type",
-			) != "dns" {
+			)
+
+			value := stringFromMap(
+				san,
+				"value",
+			)
+
+			if sanType == "" || value == "" {
 				continue
 			}
 
-			if value := stringFromMap(
-				san,
-				"value",
-			); value != "" {
-				items = append(
-					items,
-					value,
-				)
-			}
+			items = append(
+				items,
+				certificateSANModel{
+					Type:  types.StringValue(sanType),
+					Value: types.StringValue(value),
+				},
+			)
 		}
 
-		m.DNSSANs = stringsToSet(items)
+		m.SANs = sansToSet(items)
 	}
 
 	if v := stringFromMap(
@@ -814,9 +911,14 @@ func normalizeCertificateComputed(
 		)
 	}
 
-	if m.DNSSANs.IsUnknown() {
-		m.DNSSANs = types.SetNull(
-			types.StringType,
+	if m.SANs.IsUnknown() {
+		m.SANs = types.SetNull(
+			types.ObjectType{
+				AttrTypes: map[string]attr.Type{
+					"type":  types.StringType,
+					"value": types.StringType,
+				},
+			},
 		)
 	}
 
@@ -1078,8 +1180,8 @@ func certificateConfigChanged(
 	}
 
 	if certificateSetChanged(
-		state.DNSSANs,
-		plan.DNSSANs,
+		state.SANs,
+		plan.SANs,
 	) {
 		return true
 	}
@@ -1894,7 +1996,7 @@ func (r *certificateResource) ModifyPlan(
 	plan.Serial = state.Serial
 	plan.KeyUsage = state.KeyUsage
 	plan.ExtendedKeyUsage = state.ExtendedKeyUsage
-	plan.DNSSANs = state.DNSSANs
+	plan.SANs = state.SANs
 	plan.KeyAlgorithm = state.KeyAlgorithm
 	plan.KeySizeBits = state.KeySizeBits
 	plan.Curve = state.Curve
@@ -1944,8 +2046,8 @@ func mergeCertificatePlanWithState(
 		plan.ExtendedKeyUsage = state.ExtendedKeyUsage
 	}
 
-	if plan.DNSSANs.IsUnknown() {
-		plan.DNSSANs = state.DNSSANs
+	if plan.SANs.IsUnknown() {
+		plan.SANs = state.SANs
 	}
 
 	if plan.KeyAlgorithm.IsUnknown() {
@@ -2010,7 +2112,7 @@ func certificateConfigHasUnknowns(
 		config.Serial.IsUnknown() ||
 		config.KeyUsage.IsUnknown() ||
 		config.ExtendedKeyUsage.IsUnknown() ||
-		config.DNSSANs.IsUnknown() ||
+		config.SANs.IsUnknown() ||
 		config.KeyAlgorithm.IsUnknown() ||
 		config.KeySizeBits.IsUnknown() ||
 		config.Curve.IsUnknown() ||
