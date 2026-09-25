@@ -1716,7 +1716,7 @@ func (r *deviceResource) Update(
 	deviceID := state.ID.ValueString()
 
 	//
-	// Update normal device properties.
+	// Update normal device properties first.
 	//
 	_, err := r.client.Do(
 		ctx,
@@ -1736,32 +1736,85 @@ func (r *deviceResource) Update(
 	}
 
 	//
-	// Decode existing and planned attachment sets.
+	// IMPORTANT:
 	//
-	oldAttachments, diags := getDeviceAttachments(
+	// Refresh the actual remote device before reconciling attachments.
+	//
+	// Another SecuriTLS operation, such as certificate renewal/rekey/reissue,
+	// may have already updated attachment cert IDs in the backend.
+	//
+	// Terraform's previous state may therefore be stale.
+	//
+	current := state
+
+	status, readDiags, err := r.readDevice(
 		ctx,
-		state.Attachments,
+		deviceID,
+		&current,
+	)
+
+	resp.Diagnostics.Append(readDiags...)
+
+	if status == http.StatusNotFound {
+		resp.State.RemoveResource(ctx)
+		return
+	}
+
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Unable to refresh device before attachment reconciliation",
+			fmt.Sprintf(
+				"SecuriTLS returned HTTP %d: %s",
+				status,
+				err,
+			),
+		)
+
+		return
+	}
+
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	//
+	// Decode CURRENT remote leaf attachments.
+	//
+	currentAttachments, diags := getDeviceAttachments(
+		ctx,
+		current.Attachments,
 	)
 
 	resp.Diagnostics.Append(diags...)
 
-	newAttachments, diags := getDeviceAttachments(
+	//
+	// Decode PLANNED leaf attachments.
+	//
+	plannedAttachments, diags := getDeviceAttachments(
 		ctx,
 		plan.Attachments,
 	)
 
 	resp.Diagnostics.Append(diags...)
 
-	oldCAAttachments, diags := getDeviceCAAttachments(
+	//
+	// Decode CURRENT remote CA attachments.
+	//
+	currentCAAttachments, diags := getDeviceCAAttachments(
 		ctx,
-		state.CAAttachments,
+		current.CAAttachments,
 	)
+
 	resp.Diagnostics.Append(diags...)
 
-	newCAAttachments, diags := getDeviceCAAttachments(
+	//
+	// Decode PLANNED CA attachments.
+	//
+	plannedCAAttachments, diags := getDeviceCAAttachments(
 		ctx,
 		plan.CAAttachments,
 	)
+
 	resp.Diagnostics.Append(diags...)
 
 	if resp.Diagnostics.HasError() {
@@ -1769,13 +1822,17 @@ func (r *deviceResource) Update(
 	}
 
 	//
-	// Reconcile using the SecuriTLS-specific endpoints.
+	// Reconcile leaf attachments using:
+	//
+	//     current backend state
+	//             vs
+	//     Terraform planned state
 	//
 	err = r.reconcileAttachments(
 		ctx,
 		deviceID,
-		oldAttachments,
-		newAttachments,
+		currentAttachments,
+		plannedAttachments,
 	)
 
 	if err != nil {
@@ -1787,11 +1844,14 @@ func (r *deviceResource) Update(
 		return
 	}
 
+	//
+	// Reconcile CA attachments the same way.
+	//
 	err = r.reconcileCAAttachments(
 		ctx,
 		deviceID,
-		oldCAAttachments,
-		newCAAttachments,
+		currentCAAttachments,
+		plannedCAAttachments,
 	)
 
 	if err != nil {
@@ -1804,15 +1864,11 @@ func (r *deviceResource) Update(
 	}
 
 	//
-	// Re-read canonical state from SecuriTLS.
+	// Re-read the final canonical device state after all reconciliation.
 	//
-	//
-	// Start with existing state so immutable computed values such as ID
-	// and CreatedAt are never accidentally replaced with unknown plan values.
-	//
-	updated := state
+	updated := current
 
-	status, readDiags, err := r.readDevice(
+	status, readDiags, err = r.readDevice(
 		ctx,
 		deviceID,
 		&updated,
@@ -1828,7 +1884,11 @@ func (r *deviceResource) Update(
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Unable to read device after update",
-			err.Error(),
+			fmt.Sprintf(
+				"SecuriTLS returned HTTP %d: %s",
+				status,
+				err,
+			),
 		)
 
 		return
