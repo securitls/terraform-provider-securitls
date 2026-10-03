@@ -643,7 +643,15 @@ func applyCertificate(
 		m.CreatedAt = types.StringValue(v)
 	}
 
-	if automation := mapFromMap(out, "automation"); automation != nil {
+	automation := mapFromMap(out, "automation")
+
+	if details := mapFromMap(out, "details"); details != nil {
+		if nested := mapFromMap(details, "automation"); nested != nil {
+			automation = nested
+		}
+	}
+
+	if automation != nil {
 		if v, ok := automation["autoRenew"].(bool); ok {
 			m.AutoRenew = types.BoolValue(v)
 		}
@@ -658,7 +666,7 @@ func applyCertificate(
 			m.CustodyModel = types.StringValue(v)
 		}
 
-		if v := stringFromMap(key, "keyName"); v != "" {
+		if v := stringFromMap(key, "name", "keyName"); v != "" {
 			m.KeyName = types.StringValue(v)
 		} else {
 			m.KeyName = types.StringNull()
@@ -1588,66 +1596,51 @@ func (r *certificateResource) Read(
 ) {
 	var state certificateResourceModel
 
-	resp.Diagnostics.Append(
-		req.State.Get(
-			ctx,
-			&state,
-		)...,
-	)
-
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	var out map[string]any
-
-	status, err := r.client.Do(
-		ctx,
-		http.MethodGet,
-		"/certificates/"+state.ID.ValueString(),
-		nil,
-		&out,
+	out, missing, err := resolveCurrentCertificate(
+		ctx, r.client, state.ID.ValueString(),
 	)
-
-	if status == http.StatusNotFound {
+	if err != nil {
+		resp.Diagnostics.AddError("Unable to refresh certificate", err.Error())
+		return
+	}
+	if missing {
 		resp.State.RemoveResource(ctx)
 		return
 	}
 
-	if err != nil {
-		resp.Diagnostics.AddError(
-			"Unable to read certificate",
-			err.Error(),
-		)
+	applyCertificate(&state, out)
 
+	// Do not retain the old certificate's PEM if this request fails.
+	var pemResponse map[string]any
+	_, err = r.client.Do(
+		ctx,
+		http.MethodGet,
+		"/certificates/"+state.ID.ValueString()+"/pem",
+		nil,
+		&pemResponse,
+	)
+	if err != nil {
+		resp.Diagnostics.AddError("Unable to refresh certificate PEM", err.Error())
 		return
 	}
 
-	//
-	// Preserve lifecycle triggers from Terraform state.
-	// applyCertificate() does not modify them.
-	//
+	pem := stringFromMap(pemResponse, "x509")
+	if pem == "" {
+		resp.Diagnostics.AddError(
+			"Invalid certificate PEM response",
+			"SecuriTLS returned an empty x509 value.",
+		)
+		return
+	}
+	state.PEM = types.StringValue(pem)
 
-	applyCertificate(
-		&state,
-		out,
-	)
-
-	r.readPEM(
-		ctx,
-		&state,
-	)
-
-	normalizeCertificateComputed(
-		&state,
-	)
-
-	resp.Diagnostics.Append(
-		resp.State.Set(
-			ctx,
-			&state,
-		)...,
-	)
+	normalizeCertificateComputed(&state)
+	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
 //
@@ -1688,6 +1681,14 @@ func (r *certificateResource) Update(
 		resp.Diagnostics.AddError(
 			"Invalid certificate state",
 			"Certificate state does not contain an id.",
+		)
+		return
+	}
+
+	if err := requireCurrentCertificate(ctx, r.client, currentID); err != nil {
+		resp.Diagnostics.AddError(
+			"Certificate changed after planning",
+			err.Error(),
 		)
 		return
 	}
@@ -1852,28 +1853,57 @@ func (r *certificateResource) Delete(
 ) {
 	var state certificateResourceModel
 
-	resp.Diagnostics.Append(
-		req.State.Get(
-			ctx,
-			&state,
-		)...,
-	)
-
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	if state.ID.IsNull() || state.ID.IsUnknown() || state.ID.ValueString() == "" {
+		resp.Diagnostics.AddError(
+			"Invalid certificate state",
+			"Certificate state does not contain an id.",
+		)
+		return
+	}
+
+	currentID := state.ID.ValueString()
+
+	out, missing, err := resolveCurrentCertificate(ctx, r.client, currentID)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Unable to verify certificate before deletion",
+			err.Error(),
+		)
+		return
+	}
+
+	// Already deleted: allow Terraform to remove it from state.
+	if missing {
+		return
+	}
+
+	successorID := stringFromMap(out, "_id", "id")
+	if successorID != currentID {
+		resp.Diagnostics.AddError(
+			"Certificate changed after planning",
+			fmt.Sprintf(
+				"Certificate %s was replaced by %s. Run terraform plan again before deleting it.",
+				currentID,
+				successorID,
+			),
+		)
 		return
 	}
 
 	status, err := r.client.Do(
 		ctx,
 		http.MethodDelete,
-		"/certificates/"+state.ID.ValueString(),
+		"/certificates/"+currentID,
 		nil,
 		nil,
 	)
 
-	if err != nil &&
-		status != http.StatusNotFound {
-
+	if err != nil && status != http.StatusNotFound {
 		resp.Diagnostics.AddError(
 			"Unable to delete certificate",
 			err.Error(),
@@ -2121,4 +2151,127 @@ func certificateConfigHasUnknowns(
 		config.CustodyModel.IsUnknown() ||
 		config.AutoRenew.IsUnknown() ||
 		config.AutoDeploy.IsUnknown()
+}
+
+// resolveCurrentCertificate follows the replacement chain.
+//
+// missing is true only when the original ID does not exist.
+// A broken chain is an error, not a deleted Terraform resource.
+func resolveCurrentCertificate(
+	ctx context.Context,
+	client *Client,
+	startID string,
+) (cert map[string]any, missing bool, err error) {
+	if startID == "" {
+		return nil, false, fmt.Errorf("certificate ID is empty")
+	}
+
+	currentID := startID
+	seen := make(map[string]bool)
+
+	for hop := 0; hop < 256; hop++ {
+		if seen[currentID] {
+			return nil, false, fmt.Errorf(
+				"certificate replacement cycle at %s",
+				currentID,
+			)
+		}
+		seen[currentID] = true
+
+		var out map[string]any
+
+		status, requestErr := client.Do(
+			ctx,
+			http.MethodGet,
+			"/certificates/"+currentID,
+			nil,
+			&out,
+		)
+
+		if status == http.StatusNotFound {
+			if currentID == startID {
+				return nil, true, nil
+			}
+
+			return nil, false, fmt.Errorf(
+				"certificate %s points to missing successor %s",
+				startID,
+				currentID,
+			)
+		}
+
+		if requestErr != nil {
+			return nil, false, fmt.Errorf(
+				"read certificate %s: %w",
+				currentID,
+				requestErr,
+			)
+		}
+
+		actualID := stringFromMap(out, "_id", "id")
+		if actualID != currentID {
+			return nil, false, fmt.Errorf(
+				"requested certificate %s but response ID was %q",
+				currentID,
+				actualID,
+			)
+		}
+
+		details := mapFromMap(out, "details")
+		if details == nil {
+			return nil, false, fmt.Errorf(
+				"certificate %s response is missing details",
+				currentID,
+			)
+		}
+
+		raw, exists := details["replacedBy"]
+		if !exists || raw == nil {
+			return out, false, nil
+		}
+
+		nextID, ok := raw.(string)
+		if !ok {
+			return nil, false, fmt.Errorf(
+				"certificate %s: details.replacedBy must be a string or null",
+				currentID,
+			)
+		}
+
+		if nextID == "" {
+			return out, false, nil
+		}
+
+		currentID = nextID
+	}
+
+	return nil, false, fmt.Errorf(
+		"certificate replacement chain exceeds 256 entries from %s",
+		startID,
+	)
+}
+
+// Used immediately before mutations. Never silently substitute a newer
+// certificate into an already-approved Terraform plan.
+func requireCurrentCertificate(
+	ctx context.Context,
+	client *Client,
+	id string,
+) error {
+	out, missing, err := resolveCurrentCertificate(ctx, client, id)
+	if err != nil {
+		return err
+	}
+	if missing {
+		return fmt.Errorf("certificate %s no longer exists; run terraform plan again", id)
+	}
+
+	currentID := stringFromMap(out, "_id", "id")
+	if currentID != id {
+		return fmt.Errorf(
+			"certificate %s was replaced by %s; run terraform plan again",
+			id, currentID,
+		)
+	}
+	return nil
 }
